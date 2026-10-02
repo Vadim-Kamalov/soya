@@ -1,0 +1,80 @@
+---
+title: Маркетплейс — C4 Container
+config:
+  layout: elk
+  theme: base
+  themeVariables:
+    fontFamily: Arial, sans-serif
+    fontSize: 14px
+  flowchart:
+    htmlLabels: false
+    curve: linear
+  elk:
+    mergeEdges: false
+---
+flowchart TB
+    users(["Покупатель и продавец<br/>[Люди]"])
+
+    subgraph marketplace["Маркетплейс — граница системы"]
+        web["Веб-приложение<br/>[Контейнер: интерфейс]<br/>Лента, каталог и заказы"]
+        gateway["API Gateway<br/>[Контейнер: HTTP API]<br/>Единая точка входа"]
+
+        subgraph users_domain["Пользователи"]
+            identity["Identity<br/>[Контейнер: HTTP API]<br/>Профили и роли"]
+            identity_db[("Identity DB<br/>[Контейнер: БД]<br/>Владелец: Identity")]
+            identity ~~~ identity_db
+        end
+        subgraph catalog_domain["Каталог"]
+            catalog["Catalog<br/>[Контейнер: HTTP API]<br/>Товары, цены и резервы"]
+            catalog_db[("Catalog DB<br/>[Контейнер: БД]<br/>Владелец: Catalog")]
+            catalog ~~~ catalog_db
+        end
+        subgraph feed_domain["Персонализация"]
+            feed["Feed<br/>[Контейнер: HTTP API]<br/>Персональная лента"]
+            feed_db[("Feed DB<br/>[Контейнер: БД]<br/>Владелец: Feed")]
+            feed ~~~ feed_db
+        end
+        subgraph orders_domain["Заказы"]
+            orders["Orders<br/>[Контейнер: HTTP API]<br/>Оформление и статусы"]
+            orders_db[("Orders DB<br/>[Контейнер: БД]<br/>Владелец: Orders")]
+            orders ~~~ orders_db
+        end
+        subgraph payments_domain["Платежи"]
+            payments["Payments<br/>[Контейнер: HTTP API]<br/>Расчёт и учёт платежей"]
+            payments_db[("Payments DB<br/>[Контейнер: БД]<br/>Владелец: Payments")]
+            payments ~~~ payments_db
+        end
+        subgraph notifications_domain["Уведомления"]
+            notifications["Notifications<br/>[Контейнер: обработчик событий]<br/>Сообщения о статусах"]
+            notifications_db[("Notifications DB<br/>[Контейнер: БД]<br/>Владелец: Notifications")]
+            notifications ~~~ notifications_db
+        end
+    end
+
+    psp["Платёжный провайдер<br/>[Внешняя система]"]
+    delivery["Провайдер email/SMS<br/>[Внешняя система]"]
+
+    users -->|HTTPS| web
+    web -->|HTTPS| gateway
+    gateway -->|Профиль| identity
+    gateway -->|Каталог| catalog
+    gateway -->|Лента| feed
+    gateway -->|Заказы| orders
+    orders -->|Резерв| catalog
+    orders -->|Оплата| payments
+    payments -->|Платёж| psp
+    notifications -->|Отправка| delivery
+
+    %% Пунктирные связи логические: все события передаются через брокер.
+    catalog -.->|Изменения товаров| feed
+    payments -.->|Результат оплаты| orders
+    orders -.->|Статус заказа| notifications
+
+    classDef actor fill:#08427b,color:#fff,stroke:#052e56
+    classDef container fill:#438dd5,color:#fff,stroke:#1c5f9e
+    classDef database fill:#e8f2fc,color:#163d63,stroke:#438dd5
+    classDef external fill:#eef1f4,color:#344454,stroke:#7c8997
+    class users actor
+    class web,gateway,identity,catalog,feed,orders,payments,notifications container
+    class identity_db,catalog_db,feed_db,orders_db,payments_db,notifications_db database
+    class psp,delivery external
