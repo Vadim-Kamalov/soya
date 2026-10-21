@@ -1,0 +1,10 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+exclude = ["app/generated", ".local", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

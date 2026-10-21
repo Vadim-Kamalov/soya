@@ -1,0 +1,528 @@
+openapi: 3.0.3
+info:
+  title: Marketplace Homework API
+  version: 1.0.0
+  description: |
+    Contract-first API. All business endpoints require an access JWT.
+    USER buys, SELLER manages own products, ADMIN manages everything.
+    Monetary values use decimal arithmetic and two fractional digits.
+    Product text fields and the category filter cannot contain the NUL character.
+servers:
+  - url: http://localhost:8000
+security:
+  - bearerAuth: []
+paths:
+  /auth/register:
+    post:
+      operationId: register
+      tags: [Auth]
+      description: Public registration as USER or SELLER. ADMIN is provisioned by CLI.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegisterRequest'}
+      responses:
+        '201':
+          description: Registered user
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        default: {$ref: '#/components/responses/Error'}
+  /auth/login:
+    post:
+      operationId: login
+      tags: [Auth]
+      description: Public authentication. Access lasts 20 minutes; refresh lasts 14 days.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+      responses:
+        '200':
+          description: Token pair
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TokenPair'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        default: {$ref: '#/components/responses/Error'}
+  /auth/refresh:
+    post:
+      operationId: refresh
+      tags: [Auth]
+      description: Public endpoint. Rotates refresh token; a previous token cannot be reused.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefreshRequest'}
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TokenPair'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        default: {$ref: '#/components/responses/Error'}
+  /products:
+    post:
+      operationId: create_product
+      tags: [Products]
+      description: SELLER creates own product; ADMIN may set seller_id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductCreate'}
+      responses:
+        '201':
+          description: Created product
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        default: {$ref: '#/components/responses/Error'}
+    get:
+      operationId: list_products
+      tags: [Products]
+      description: USER, SELLER, ADMIN can read all products including archived ones.
+      parameters:
+        - name: page
+          in: query
+          schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}
+        - name: size
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/ProductStatus'}
+        - name: category
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 100, pattern: '^[^\u0000]*$'}
+      responses:
+        '200':
+          description: Deterministic page filtered by status and exact category
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductPage'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        default: {$ref: '#/components/responses/Error'}
+  /products/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    get:
+      operationId: get_product
+      tags: [Products]
+      description: USER, SELLER, ADMIN can read any product.
+      responses:
+        '200':
+          description: Product
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      operationId: update_product
+      tags: [Products]
+      description: |
+        Full replacement. SELLER only own products; ADMIN any. seller_id cannot change.
+        Available stock plus reservations in CREATED/PAYMENT_PENDING must fit int32
+        warehouse capacity (2147483647), so canceled reservations can always be returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductUpdate'}
+      responses:
+        '200':
+          description: Updated product
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: delete_product
+      tags: [Products]
+      description: Soft deletion (ARCHIVED). SELLER only own products; ADMIN any.
+      responses:
+        '204': {description: Product archived; row retained}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        default: {$ref: '#/components/responses/Error'}
+  /orders:
+    post:
+      operationId: create_order
+      tags: [Orders]
+      description: |
+        USER and ADMIN. Checks rate limit, active order, catalog, then stock.
+        Duplicate product IDs are aggregated. Reservation, promo usage and operation
+        history are atomic. Percentage rates above 70 leave the full price payable
+        (zero discount). Otherwise discount cannot exceed 70% of subtotal.
+        After applying the promo, total_amount and discount_amount must each fit
+        DECIMAL(12,2); the intermediate subtotal is not subject to that limit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OrderCreate'}
+      responses:
+        '201':
+          description: Reserved order in CREATED state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OrderResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/PromoError'}
+        '429': {$ref: '#/components/responses/RateLimit'}
+        default: {$ref: '#/components/responses/Error'}
+  /orders/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    get:
+      operationId: get_order
+      tags: [Orders]
+      description: USER only own orders; ADMIN any; SELLER denied.
+      responses:
+        '200':
+          description: Order with price snapshots
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OrderResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      operationId: update_order
+      tags: [Orders]
+      description: |
+        USER only own CREATED orders; ADMIN any CREATED order. SELLER denied.
+        Retained product IDs keep their price_at_order snapshot, including changed
+        quantities. Newly added products use current catalog prices; a previously
+        removed product is new when added again. Returns old reservations,
+        reserves new items and records UPDATE_ORDER atomically. If an existing
+        promo is no longer applicable it is removed and usage is returned.
+        Final total_amount and discount_amount must each fit DECIMAL(12,2).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OrderUpdate'}
+      responses:
+        '200':
+          description: Recalculated order
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OrderResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/RateLimit'}
+        default: {$ref: '#/components/responses/Error'}
+  /orders/{id}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      operationId: cancel_order
+      tags: [Orders]
+      description: USER own orders; ADMIN any. Only CREATED or PAYMENT_PENDING; stock and promo returned once.
+      responses:
+        '200':
+          description: Canceled order
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OrderResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        default: {$ref: '#/components/responses/Error'}
+  /orders/{id}/status:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      operationId: transition_order
+      tags: [Orders]
+      description: ADMIN only. CREATED -> PAYMENT_PENDING -> PAID -> SHIPPED -> COMPLETED. Use cancel endpoint to cancel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OrderTransition'}
+      responses:
+        '200':
+          description: New order state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OrderResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        default: {$ref: '#/components/responses/Error'}
+  /promo-codes:
+    post:
+      operationId: create_promo
+      tags: [Promo codes]
+      description: SELLER or ADMIN creates a promo code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PromoCreate'}
+      responses:
+        '201':
+          description: Created promo code
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PromoResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        default: {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+  responses:
+    Error:
+      description: Unified error. INTERNAL_ERROR=500, ROUTE_NOT_FOUND=404, METHOD_NOT_ALLOWED=405.
+      headers:
+        X-Request-Id:
+          schema: {type: string, format: uuid}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    ValidationError:
+      description: VALIDATION_ERROR (400). details.fields lists field and message.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Unauthorized:
+      description: TOKEN_EXPIRED, TOKEN_INVALID, REFRESH_TOKEN_INVALID, INVALID_CREDENTIALS (401).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Forbidden:
+      description: ACCESS_DENIED or ORDER_OWNERSHIP_VIOLATION (403).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    NotFound:
+      description: PRODUCT_NOT_FOUND or ORDER_NOT_FOUND (404).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Conflict:
+      description: PRODUCT_INACTIVE, ORDER_HAS_ACTIVE, INVALID_STATE_TRANSITION, INSUFFICIENT_STOCK, USER_ALREADY_EXISTS, PROMO_ALREADY_EXISTS (409).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    PromoError:
+      description: PROMO_CODE_INVALID or PROMO_CODE_MIN_AMOUNT (422).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    RateLimit:
+      description: ORDER_LIMIT_EXCEEDED (429). Separate CREATE_ORDER and UPDATE_ORDER limits, configured in minutes.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+  schemas:
+    ProductStatus:
+      type: string
+      enum: [ACTIVE, INACTIVE, ARCHIVED]
+    OrderStatus:
+      type: string
+      enum: [CREATED, PAYMENT_PENDING, PAID, SHIPPED, COMPLETED, CANCELED]
+    Role:
+      type: string
+      enum: [USER, SELLER, ADMIN]
+    ProductCreate:
+      type: object
+      additionalProperties: false
+      required: [name, price, stock, category, status]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000]*$'}
+        description: {type: string, maxLength: 4000, nullable: true, pattern: '^[^\u0000]*$'}
+        price: {type: number, format: decimal, minimum: 0.01, maximum: 9999999999.99, multipleOf: 0.01}
+        stock: {type: integer, minimum: 0, maximum: 2147483647}
+        category: {type: string, minLength: 1, maxLength: 100, pattern: '^[^\u0000]*$'}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+        seller_id: {type: string, format: uuid, nullable: true, description: 'ADMIN only; defaults to authenticated seller'}
+    ProductUpdate:
+      type: object
+      additionalProperties: false
+      required: [name, price, stock, category, status]
+      properties: &productFields
+        name: {type: string, minLength: 1, maxLength: 255, pattern: '^[^\u0000]*$'}
+        description: {type: string, maxLength: 4000, nullable: true, pattern: '^[^\u0000]*$'}
+        price: {type: number, format: decimal, minimum: 0.01, maximum: 9999999999.99, multipleOf: 0.01}
+        stock: {type: integer, minimum: 0, maximum: 2147483647}
+        category: {type: string, minLength: 1, maxLength: 100, pattern: '^[^\u0000]*$'}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+    ProductResponse:
+      type: object
+      additionalProperties: false
+      required: [name, price, stock, category, status, id, seller_id, created_at, updated_at]
+      properties:
+        <<: *productFields
+        id: {type: string, format: uuid, readOnly: true}
+        seller_id: {type: string, format: uuid, readOnly: true}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+    ProductPage:
+      type: object
+      required: [items, totalElements, page, size]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ProductResponse'}}
+        totalElements: {type: integer, minimum: 0}
+        page: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 1}
+    OrderItemRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id, quantity]
+      properties:
+        product_id: {type: string, format: uuid}
+        quantity: {type: integer, minimum: 1, maximum: 999}
+    OrderCreate:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, minItems: 1, maxItems: 50, items: {$ref: '#/components/schemas/OrderItemRequest'}}
+        promo_code: {type: string, pattern: '^[A-Z0-9_]{4,20}$', nullable: true}
+    OrderUpdate:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, minItems: 1, maxItems: 50, items: {$ref: '#/components/schemas/OrderItemRequest'}}
+    OrderItemResponse:
+      type: object
+      required: [id, product_id, quantity, price_at_order]
+      properties:
+        id: {type: string, format: uuid}
+        product_id: {type: string, format: uuid}
+        quantity: {type: integer, minimum: 1, description: Aggregated requested quantity}
+        price_at_order: {type: number, format: decimal, minimum: 0.01}
+    OrderResponse:
+      type: object
+      required: [id, user_id, status, items, total_amount, discount_amount, promo_code_id, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        status: {$ref: '#/components/schemas/OrderStatus'}
+        items: {type: array, items: {$ref: '#/components/schemas/OrderItemResponse'}}
+        total_amount: {type: number, format: decimal, minimum: 0, maximum: 9999999999.99, multipleOf: 0.01}
+        discount_amount: {type: number, format: decimal, minimum: 0, maximum: 9999999999.99, multipleOf: 0.01}
+        promo_code_id: {type: string, format: uuid, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    OrderTransition:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {$ref: '#/components/schemas/OrderStatus'}
+    PromoCreate:
+      type: object
+      additionalProperties: false
+      required: [code, discount_type, discount_value, min_order_amount, max_uses, valid_from, valid_until]
+      properties: &promoFields
+        code: {type: string, pattern: '^[A-Z0-9_]{4,20}$'}
+        discount_type: {type: string, enum: [PERCENTAGE, FIXED_AMOUNT]}
+        discount_value: {type: number, format: decimal, minimum: 0.01, maximum: 9999999999.99, multipleOf: 0.01}
+        min_order_amount: {type: number, format: decimal, minimum: 0, maximum: 9999999999.99, multipleOf: 0.01}
+        max_uses: {type: integer, minimum: 1, maximum: 2147483647}
+        valid_from: {type: string, format: date-time}
+        valid_until: {type: string, format: date-time}
+        active: {type: boolean, default: true}
+    PromoResponse:
+      type: object
+      additionalProperties: false
+      required: [code, discount_type, discount_value, min_order_amount, max_uses, valid_from, valid_until, active, id, current_uses]
+      properties:
+        <<: *promoFields
+        id: {type: string, format: uuid}
+        current_uses: {type: integer, minimum: 0}
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties: &loginFields
+        username: {type: string, minLength: 3, maxLength: 100, pattern: '^[a-zA-Z0-9_.-]+$'}
+        password: {type: string, minLength: 8, maxLength: 128, format: password}
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        <<: *loginFields
+        role: {type: string, enum: [USER, SELLER], default: USER}
+    UserResponse:
+      type: object
+      required: [id, username, role]
+      properties:
+        id: {type: string, format: uuid}
+        username: {type: string}
+        role: {$ref: '#/components/schemas/Role'}
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token: {type: string, minLength: 1, maxLength: 4096}
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token: {type: string}
+        refresh_token: {type: string}
+        token_type: {type: string, enum: [bearer]}
+        expires_in: {type: integer}
+    ApiError:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          type: string
+          enum: [PRODUCT_NOT_FOUND, PRODUCT_INACTIVE, ORDER_NOT_FOUND, ORDER_LIMIT_EXCEEDED, ORDER_HAS_ACTIVE, INVALID_STATE_TRANSITION, INSUFFICIENT_STOCK, PROMO_CODE_INVALID, PROMO_CODE_MIN_AMOUNT, ORDER_OWNERSHIP_VIOLATION, VALIDATION_ERROR, TOKEN_EXPIRED, TOKEN_INVALID, REFRESH_TOKEN_INVALID, ACCESS_DENIED, INVALID_CREDENTIALS, USER_ALREADY_EXISTS, PROMO_ALREADY_EXISTS, INTERNAL_ERROR, ROUTE_NOT_FOUND, METHOD_NOT_ALLOWED]
+        message: {type: string}
+        details: {type: object, nullable: true, additionalProperties: true}

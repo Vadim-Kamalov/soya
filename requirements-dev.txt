@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==8.3.5
+openapi-spec-validator==0.7.2
+ruff==0.11.10

@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16.8-alpine
+    environment:
+      POSTGRES_DB: marketplace_test
+      POSTGRES_USER: marketplace
+      POSTGRES_PASSWORD: test_password
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U marketplace -d marketplace_test']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  migrate:
+    image: redgate/flyway:11.8.2
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      FLYWAY_URL: jdbc:postgresql://db:5432/marketplace_test
+      FLYWAY_USER: marketplace
+      FLYWAY_PASSWORD: test_password
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_CLEAN_DISABLED: 'true'
+    volumes:
+      - ./src/main/resources/db/migration:/flyway/sql:ro
+    command: migrate
+  tests:
+    build:
+      context: .
+      target: test
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    environment:
+      TEST_DATABASE_URL: postgresql://marketplace:test_password@db:5432/marketplace_test

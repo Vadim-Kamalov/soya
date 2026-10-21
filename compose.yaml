@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16.8-alpine
+    environment:
+      POSTGRES_DB: marketplace
+      POSTGRES_USER: marketplace
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-marketplace_local}
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U marketplace -d marketplace']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  migrate:
+    image: redgate/flyway:11.8.2
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      FLYWAY_URL: jdbc:postgresql://db:5432/marketplace
+      FLYWAY_USER: marketplace
+      FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:-marketplace_local}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_CLEAN_DISABLED: 'true'
+    volumes:
+      - ./src/main/resources/db/migration:/flyway/sql:ro
+    command: migrate
+  api:
+    build: .
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: postgresql://marketplace:${POSTGRES_PASSWORD:-marketplace_local}@db:5432/marketplace
+      JWT_SECRET: ${JWT_SECRET:-local-demo-secret-change-before-deployment-1234567890}
+      ORDER_RATE_LIMIT_MINUTES: ${ORDER_RATE_LIMIT_MINUTES:-1}
+    ports:
+      - '127.0.0.1:8000:8000'
+    healthcheck:
+      test: ['CMD', 'python', '-c', 'import urllib.request; urllib.request.urlopen("http://localhost:8000/health")']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  pgdata:
