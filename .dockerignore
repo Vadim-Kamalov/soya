@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+.env
+.superpowers
+docs/superpowers
+.agents
+.codex
+.idea
+.vscode
+test-results
+task.html
+
