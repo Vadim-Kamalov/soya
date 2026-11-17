@@ -1,0 +1,35 @@
+@startuml
+!include <C4/C4_Container>
+LAYOUT_TOP_DOWN()
+title Вариант 2 — C4 Container: Kafka + Temporal
+System_Ext(products, "Продуктовые сервисы банка", "Бизнес-события и transactional outbox")
+System_Ext(policy, "Настройки и контакты", "Согласия и допустимые маршруты")
+System_Ext(channels, "Push / SMS / email", "APNs/FCM, SMS A/B, SMTP/HTTP email")
+Person(customer, "Клиент", "Приложение банка и устройства")
+System_Boundary(platform, "Notification Platform — критичный тракт") {
+  Container(api, "API + Outbox Relay", "Go", "Надёжный приём; публикация событий")
+  ContainerQueue(kafka, "Critical Event Bus", "Apache Kafka", "Изоляция от bulk; повторяемый старт и receipts")
+  Container(bridge, "Workflow Bridge", "Go, Temporal SDK", "Start, signals, late receipts, reconciler")
+  Container(temporal, "Temporal Service", "Self-hosted, 3 AZ", "Durable history, timers, task queues")
+  Container(worker, "Workflow / Activity Workers", "Go, Temporal SDK", "Политика доставки; I/O только в activities")
+  Container(receipts, "Receipt Gateway", "Go, HTTPS", "Проверка и надёжный приём ACK/DLR")
+  ContainerDb(ledger, "Delivery Ledger", "PostgreSQL + Patroni", "Приём, attempt idempotency, receipts, outbox, read model")
+  ContainerDb(history, "Workflow Persistence", "PostgreSQL HA", "Отдельная БД Temporal: история и таймеры")
+}
+Rel(products, api, "Передаёт бизнес-событие", "mTLS/HTTPS")
+Rel(api, ledger, "notification + outbox; затем 202", "SQL transaction")
+Rel(api, kafka, "Публикует outbox", "acks=all")
+Rel(kafka, bridge, "Accepted / ReceiptConfirmed", "consumer group")
+Rel(bridge, temporal, "Start / Signal workflow_id=notification_id", "gRPC")
+Rel(bridge, ledger, "Регистрация старта; retry inbox; поздний итог", "SQL/CAS")
+Rel(temporal, history, "Надёжно хранит execution state", "SQL")
+Rel(worker, temporal, "Poll tasks; commands; results", "gRPC")
+Rel(worker, ledger, "Attempt gate, read model, receipts", "SQL/CAS")
+Rel(worker, policy, "Читает политику в activity", "HTTPS")
+Rel(worker, channels, "Отправляет из activity", "HTTPS/SMTP")
+Rel(channels, customer, "Доставляет")
+Rel(channels, receipts, "Signed DLR", "HTTPS")
+Rel(customer, receipts, "Delivery ACK", "Authenticated HTTPS")
+Rel(receipts, ledger, "Receipt inbox + outbox", "SQL transaction")
+SHOW_LEGEND()
+@enduml

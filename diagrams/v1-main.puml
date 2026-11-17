@@ -1,0 +1,39 @@
+@startuml
+title Вариант 1 — основной сценарий: push подтверждён
+autonumber
+hide footbox
+participant "Бизнес-сервис" as B
+participant "API" as A
+database "PostgreSQL" as D
+participant "Relay" as R
+queue "Kafka critical" as K
+participant "Coordinator" as C
+participant "Push worker" as W
+participant "APNs/FCM" as P
+participant "Клиент" as U
+participant "Receipt Gateway" as G
+B -> A: событие + business_key
+A -> D: TX: unique notification + outbox
+D --> A: synchronous commit (t0)
+A --> B: 202 + notification_id
+R -> D: прочитать outbox
+R -> K: NotificationAccepted, key=user_id
+K -> C: событие (at-least-once)
+note right of C: Контакты получены от сервиса настроек.
+C -> D: Одна TX: inbox dedup + policy snapshot\n+ attempt PREPARED + timer + command outbox
+R -> K: SendAttempt(attempt_id)
+K -> W: команда
+W -> D: Gate: confirmed/closed/TTL/допуски;\nCAS PREPARED -> DISPATCHING + lease
+D --> W: право отправки, epoch
+W -> P: push(notification_id), stable attempt key
+P --> W: accepted (не DELIVERED)
+W -> D: attempt ACCEPTED
+P -> U: push
+U -> G: authenticated delivery ACK
+G -> D: TX: receipt + confirmed gate + outbox
+G --> U: ACK сохранён
+R -> K: ReceiptConfirmed
+K -> C: ReceiptConfirmed
+C -> D: TX: DELIVERED; отменить pending timers/commands
+note over C,D: Поздние повторы receipt не меняют терминальный результат.
+@enduml

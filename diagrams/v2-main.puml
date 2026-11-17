@@ -1,0 +1,44 @@
+@startuml
+title Вариант 2 — основной сценарий: durable workflow и push ACK
+autonumber
+hide footbox
+participant "API / Relay" as A
+database "Delivery Ledger" as D
+queue "Kafka critical" as K
+participant "Bridge" as B
+participant "Temporal Service" as T
+participant "Workflow worker" as F
+participant "Activity worker" as W
+participant "APNs/FCM" as P
+participant "Клиент / Gateway" as G
+A -> D: TX: notification + outbox; commit
+note over A,D: API возвращает 202 только после commit (t0).
+A -> K: NotificationAccepted
+K -> B: событие
+B -> T: StartWorkflow(id=notification_id, reject duplicate)
+T --> B: start надёжно сохранён / already started
+B -> D: сохранить маркер старта
+B -> K: commit consumer offset
+T -> F: workflow task
+F -> T: schedule push activity + timer(t0+3s)
+T -> W: activity task
+W -> D: gate: confirmed/closed/TTL/допуски;\nstable attempt_id, CAS + lease
+W -> P: push(notification_id)
+P --> W: accepted
+W -> D: сохранить результат
+W -> T: activity completed
+P -> G: push доставлен; клиент посылает ACK
+G -> D: TX: receipt + confirmed gate + outbox
+A -> K: ReceiptConfirmed
+K -> B: receipt event
+B -> T: Signal(notification_id, receipt_id)
+T -> F: signal из durable history
+F -> T: отменить timer; schedule final projection
+T -> W: projection activity
+W -> D: TX: read model + компактный итог
+W -> T: ActivityCompleted
+T -> F: результат финальной activity
+F -> T: CompleteWorkflow(DELIVERED)
+note over T,D: Источник состояния оркестрации — history,
+note over T,D: Ledger — источник приёма, receipts и внешних попыток.
+@enduml

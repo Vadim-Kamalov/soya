@@ -1,0 +1,37 @@
+@startuml
+title Вариант 1 — failover: нет push ACK, SMS подтверждена
+autonumber
+hide footbox
+participant "Coordinator / Timer scanner" as C
+database "PostgreSQL" as D
+participant "Relay + Kafka" as K
+participant "SMS worker" as W
+participant "SMS A" as S
+participant "Receipt Gateway" as G
+participant "Клиент" as U
+note over C,D: Push уже ACCEPTED. Таймер: t0 + 3 с.
+C -> D: SELECT due timer; lock notification
+D --> C: нет подтверждения, version=v
+C -> D: TX: push UNKNOWN; SMS PREPARED
+note right of D: Один переход версии; command outbox и новый таймер.
+K -> D: прочитать outbox
+K -> W: SendAttempt(SMS attempt_id)
+W -> D: Gate: confirmed/closed/TTL/допуски;\nCAS PREPARED -> DISPATCHING + lease
+note right of W: Повторно проверить DELIVERED и право отправки.
+W -> S: SMS + стабильный ключ attempt_id
+S --> W: provider_message_id, accepted
+W -> D: сохранить ACCEPTED и mapping
+S -> U: доставить SMS
+S -> G: signed DLR(delivered)
+G -> D: TX: receipt + confirmed gate + outbox
+K -> C: ReceiptConfirmed(SMS)
+C -> D: TX: DELIVERED; отменить pending email
+opt Поздний push ACK после отправки SMS
+  U -> G: ACK(push, notification_id)
+  G -> D: сохранить дополнительный receipt
+  K -> C: ReceiptConfirmed(push)
+  C -> D: аудит late delivery; без новой отправки
+end
+note over C,U: Уже переданную SMS отозвать нельзя.
+note over C,U: Возможен повторный показ; новые попытки подавляются.
+@enduml

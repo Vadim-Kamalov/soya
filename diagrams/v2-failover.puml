@@ -1,0 +1,50 @@
+@startuml
+title Вариант 2 — failover: таймер, сбой worker, поздний ACK
+autonumber
+hide footbox
+participant "Temporal Service" as T
+participant "Workflow worker" as F
+participant "Activity worker" as W
+database "Delivery Ledger" as D
+participant "SMS A" as S
+participant "Gateway + Bridge" as G
+note over T,F: Push ACCEPTED, подтверждения к t0+3с нет.
+T -> F: TimerFired из durable history
+F -> T: schedule SMS activity(stable attempt_id)
+T -> W: activity task
+W -> D: gate: confirmed/closed/TTL/допуски;\nCAS PREPARED -> DISPATCHING + lease
+W -> S: send(stable attempt_id)
+S --> W: accepted
+alt Результат записан до падения worker
+  W -> D: provider_message_id, ACCEPTED
+  note over W,T: Worker упал до ActivityCompleted.
+  T -> W: повтор activity после timeout
+  W -> D: lookup того же attempt_id
+  D --> W: ACCEPTED + provider_message_id
+  W -> T: сохранённый результат; без новой SMS
+else Worker упал до записи результата
+  T -> W: повтор activity после timeout
+  W -> D: expired lease: DISPATCHING -> UNKNOWN
+  W -> S: status query по стабильному ключу
+  S --> W: accepted + provider_message_id
+  W -> D: сохранить ACCEPTED
+  W -> T: восстановленный результат
+  note over W,S: Если status/idempotency недоступны — UNKNOWN;
+  note over W,S: прежний маршрут блокируется, выбирается резерв.
+end
+S -> G: signed DLR(delivered)
+G -> D: TX: receipt + confirmed gate + outbox
+G -> T: Signal(notification_id, receipt_id)
+T -> F: durable signal
+F -> T: отменить pending email; schedule final projection
+T -> W: final projection activity
+W -> D: TX: read model + компактный итог
+W -> T: ActivityCompleted
+T -> F: результат финальной activity
+F -> T: CompleteWorkflow(DELIVERED)
+opt Поздний push ACK после закрытия workflow
+  G -> D: сохранить receipt; прочитать терминальный итог
+  G -> D: аудит late delivery; событие обработано
+  note over T,G: Без Signal закрытому workflow и без нового Start.
+end
+@enduml

@@ -1,0 +1,34 @@
+@startuml
+!include <C4/C4_Container>
+LAYOUT_TOP_DOWN()
+title Вариант 1 — C4 Container: Kafka + собственный автомат
+System_Ext(products, "Продуктовые сервисы банка", "Бизнес-события и transactional outbox")
+System_Ext(policy, "Настройки и контакты", "Согласия, верифицированные контакты, версии политики")
+System_Ext(channels, "Push / SMS / email", "APNs/FCM, SMS A/B, SMTP/HTTP email")
+Person(customer, "Клиент", "Приложение банка и устройства")
+System_Boundary(platform, "Notification Platform — критичный тракт") {
+  Container(api, "Notification API", "Go, REST", "Валидация и надёжный приём")
+  Container(relay, "Outbox Relay", "Go", "Повторяемая публикация")
+  ContainerQueue(kafka, "Critical Event Bus", "Apache Kafka", "Отдельный кластер от bulk; RF=3")
+  Container(fsm, "Delivery Coordinator", "Go", "Автомат, timers, leases, reconciler, failover")
+  Container(sender, "Delivery Workers", "Go", "Отдельные пулы каналов, квоты, circuit breaker")
+  Container(receipts, "Receipt Gateway", "Go, HTTPS", "Проверка callbacks и ACK клиента")
+  ContainerDb(db, "Delivery Ledger", "PostgreSQL + Patroni", "Шарды: notification, attempt, timer, inbox/outbox")
+}
+Rel(products, api, "Передаёт событие с постоянным ключом", "mTLS/HTTPS")
+Rel(api, db, "notification + outbox; затем 202", "SQL transaction")
+Rel(relay, db, "Читает неопубликованный outbox", "SQL")
+Rel(relay, kafka, "Публикует события", "acks=all")
+Rel(kafka, fsm, "События и receipts", "consumer group")
+Rel(fsm, db, "Переходы, таймеры, команды outbox", "SQL/CAS")
+Rel(fsm, policy, "Получает допустимые маршруты", "HTTPS")
+Rel(kafka, sender, "Команды попыток", "consumer groups")
+Rel(sender, db, "Захватывает попытку, сохраняет результат", "SQL/CAS")
+Rel(sender, policy, "Проверяет допуски перед отправкой", "HTTPS")
+Rel(sender, channels, "Отправляет с attempt key", "HTTPS/SMTP")
+Rel(channels, customer, "Доставляет уведомление")
+Rel(channels, receipts, "DLR / delivery event", "Signed HTTPS")
+Rel(customer, receipts, "ACK(notification_id)", "Authenticated HTTPS")
+Rel(receipts, db, "Receipt inbox + outbox", "SQL transaction")
+SHOW_LEGEND()
+@enduml
