@@ -1,0 +1,276 @@
+{
+  "uid": "cinema-analytics",
+  "title": "Аналитика онлайн-кинотеатра",
+  "tags": [
+    "cinema",
+    "clickhouse"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 41,
+  "version": 2,
+  "refresh": "30s",
+  "time": {
+    "from": "now-14d/d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Retention Cohort Heatmap",
+      "description": "Когорты по дате первого события. В ячейках доля пользователей, активных в каждый день жизни когорты. Тире обозначает незавершившийся день.",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT toString(day) AS \"Когорта\", activity_cohort_size AS \"Пользователи\", activity_retention[1] AS \"Day 0\", activity_retention[2] AS \"Day 1\", activity_retention[3] AS \"Day 2\", activity_retention[4] AS \"Day 3\", activity_retention[5] AS \"Day 4\", activity_retention[6] AS \"Day 5\", activity_retention[7] AS \"Day 6\", activity_retention[8] AS \"Day 7\"\nFROM cinema.daily_aggregates FINAL\nWHERE day BETWEEN toDate32($__fromTime) AND toDate32($__toTime) AND activity_cohort_size > 0\nORDER BY day DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "—"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^Day [0-7]$/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.align",
+                "value": "center"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "#34345D",
+                      "value": 0
+                    },
+                    {
+                      "color": "#464480",
+                      "value": 0.2
+                    },
+                    {
+                      "color": "#385F9A",
+                      "value": 0.4
+                    },
+                    {
+                      "color": "#287D98",
+                      "value": 0.6
+                    },
+                    {
+                      "color": "#22826B",
+                      "value": 0.8
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "md",
+        "sortBy": [
+          {
+            "displayName": "Когорта",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "title": "Активные пользователи · DAU",
+      "description": "Уникальные пользователи по всем типам событий за сутки UTC.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT toDateTime(day, 'UTC') AS time, dau AS \"Зрители\"\nFROM cinema.daily_aggregates FINAL\nWHERE day BETWEEN toDate32($__fromTime) AND toDate32($__toTime)\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Конверсия просмотров",
+      "description": "Число завершений, делённое на число стартов просмотров за сутки UTC.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT toDateTime(day, 'UTC') AS time, view_conversion AS \"Конверсия\"\nFROM cinema.daily_aggregates FINAL\nWHERE day BETWEEN toDate32($__fromTime) AND toDate32($__toTime)\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Топ фильмов по дням",
+      "description": "До десяти фильмов в день по числу стартов просмотра.",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT toString(day) AS \"Дата\", movie.1 AS \"Фильм\", movie.2 AS \"Просмотры\"\nFROM cinema.daily_aggregates FINAL\nARRAY JOIN top_movies AS movie\nWHERE day BETWEEN toDate32($__fromTime) AND toDate32($__toTime)\nORDER BY day DESC, movie.2 DESC, movie.1\nLIMIT 140"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    }
+  ]
+}

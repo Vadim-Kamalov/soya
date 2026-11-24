@@ -1,0 +1,23 @@
+services:
+  schema-registry:
+    ports: !reset []
+  clickhouse:
+    ports: !reset []
+  s3:
+    ports: !reset []
+  database-init:
+    image: !reset null
+  bootstrap:
+    image: !reset null
+  producer:
+    image: !reset null
+    ports: !reset []
+    environment:
+      GENERATOR_ENABLED: "false"
+  aggregation:
+    image: !reset null
+    ports: !reset []
+  grafana:
+    ports: !reset []
+  integration-tests:
+    image: !reset null

@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!requirements.txt
+!cinema/
+!schemas/
+!sql/
+!tests/
+**/__pycache__

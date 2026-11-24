@@ -1,0 +1,238 @@
+name: soya-cinema
+
+x-kafka: &kafka
+  image: confluentinc/cp-kafka:7.8.12
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "cub kafka-ready -b localhost:9092 1 5"]
+    interval: 10s
+    timeout: 10s
+    retries: 15
+    start_period: 20s
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: q1Sh-9_ISia_zwGINzRvyQ
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_LISTENERS: BROKER://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+  KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+
+x-app: &app
+  image: ${COMPOSE_PROJECT_NAME:-soya}-cinema-app:local
+  build: .
+
+x-s3-env: &s3-env
+  AWS_ACCESS_KEY_ID: cinema-storage
+  AWS_SECRET_ACCESS_KEY: cinema-storage-secret
+  AWS_DEFAULT_REGION: us-east-1
+
+services:
+  kafka-1:
+    <<: *kafka
+    hostname: kafka-1
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka-1:9092
+    volumes:
+      - kafka-1-data:/var/lib/kafka/data
+
+  kafka-2:
+    <<: *kafka
+    hostname: kafka-2
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka-2:9092
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+
+  kafka-3:
+    <<: *kafka
+    hostname: kafka-3
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka-3:9092
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+
+  schema-registry:
+    image: ghcr.io/aiven-open/karapace:4.2.0
+    hostname: schema-registry
+    restart: unless-stopped
+    command: ["/opt/karapace/start.sh", "registry"]
+    environment:
+      KARAPACE_HOST: 0.0.0.0
+      KARAPACE_PORT: 8081
+      KARAPACE_ADVERTISED_HOSTNAME: schema-registry
+      KARAPACE_BOOTSTRAP_URI: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      KARAPACE_REPLICATION_FACTOR: 3
+    depends_on:
+      kafka-1: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:${REGISTRY_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8081/subjects', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 25
+      start_period: 15s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: analytics
+      CLICKHOUSE_PASSWORD: analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_PORT:-8123}:8123"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./config/clickhouse-kafka.xml:/etc/clickhouse-server/config.d/kafka.xml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cinema
+      POSTGRES_USER: cinema
+      POSTGRES_PASSWORD: cinema
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  s3:
+    image: ghcr.io/chrislusf/seaweedfs:4.22
+    restart: unless-stopped
+    command: ["mini", "-dir=/data", "-ip=s3", "-ip.bind=0.0.0.0"]
+    environment:
+      <<: *s3-env
+    ports:
+      - "127.0.0.1:${S3_PORT:-8333}:8333"
+    volumes:
+      - s3-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+
+  database-init:
+    <<: *app
+    command: ["python", "-m", "cinema.bootstrap", "databases"]
+    depends_on:
+      clickhouse: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  bootstrap:
+    <<: *app
+    command: ["python", "-m", "cinema.bootstrap", "ingestion"]
+    depends_on:
+      schema-registry: {condition: service_healthy}
+      database-init: {condition: service_completed_successfully}
+
+  producer:
+    <<: *app
+    restart: unless-stopped
+    command: ["uvicorn", "cinema.producer:app", "--host", "0.0.0.0", "--port", "8000"]
+    stop_grace_period: 40s
+    environment:
+      GENERATOR_ENABLED: ${GENERATOR_ENABLED:-true}
+      GENERATOR_INTERVAL_SECONDS: ${GENERATOR_INTERVAL_SECONDS:-3}
+    ports:
+      - "127.0.0.1:${PRODUCER_PORT:-8000}:8000"
+    depends_on:
+      bootstrap: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  aggregation:
+    <<: *app
+    restart: unless-stopped
+    command: ["uvicorn", "cinema.aggregation:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      <<: *s3-env
+      AGGREGATION_INTERVAL_SECONDS: ${AGGREGATION_INTERVAL_SECONDS:-60}
+      AGGREGATION_LOOKBACK_DAYS: ${AGGREGATION_LOOKBACK_DAYS:-14}
+      EXPORT_REQUESTS_DIR: /var/lib/cinema/export-requests
+    ports:
+      - "127.0.0.1:${AGGREGATION_PORT:-8001}:8001"
+    depends_on:
+      database-init: {condition: service_completed_successfully}
+    volumes:
+      - export-requests-data:/var/lib/cinema/export-requests
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/health', timeout=4)"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  grafana:
+    image: grafana/grafana:11.6.4
+    restart: unless-stopped
+    environment:
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource 4.11.2
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      database-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 4s
+      retries: 24
+      start_period: 10s
+
+  integration-tests:
+    <<: *app
+    profiles: [test]
+    command: ["python", "-m", "tests.integration"]
+    environment: *s3-env
+    depends_on:
+      producer: {condition: service_healthy}
+      aggregation: {condition: service_healthy}
+      s3: {condition: service_healthy}
+      grafana: {condition: service_healthy}
+
+volumes:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:
+  clickhouse-data:
+  postgres-data:
+  s3-data:
+  grafana-data:
+  export-requests-data:
